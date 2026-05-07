@@ -23,10 +23,9 @@ source venv/bin/activate
 python3 bot.py
 
 ```bash
-wget -O install.sh https://raw.githubusercontent.com/YOUR_USERNAME/telegram-bot/main/install_bot.sh
-chmod +x install.sh
-./install.sh
+wget -O install.sh https://raw.githubusercontent.com/88Dand/InterceptorTGBot/main/install_TgBot.sh && chmod +x install.sh && ./install.sh
 
+```
 # Запуск сервиса
 sudo systemctl start telegram_bot
 
