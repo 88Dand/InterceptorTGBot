@@ -1,5 +1,5 @@
 # InterceptorTGBot
-cat > README.md << 'EOF'
+
 # Telegram Auto-Reply Bot
 
 ## 📝 Описание
