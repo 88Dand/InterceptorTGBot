@@ -12,6 +12,7 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}Telegram Bot Auto-Reply Installer${NC}"
 echo -e "${BLUE}========================================${NC}"
 
+
 # Проверка прав
 #if [ "$EUID" -eq 0 ]; then 
 #   echo -e "${RED}Пожалуйста, не запускайте скрипт от root${NC}"
