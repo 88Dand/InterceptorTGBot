@@ -1,5 +1,3 @@
-# InterceptorTGBot
-
 # Telegram Auto-Reply Bot
 
 ## 📝 Описание
