@@ -473,11 +473,6 @@ logs() {
   journalctl -u "$SERVICE_NAME" -f --no-pager
 }
 
-if [[ ! -f "$SERVICE_FILE" && ! -d "$APP_DIR" ]]; then
-  install_or_reinstall
-  exit 0
-fi
-
 while true; do
   menu
   case "$choice" in
