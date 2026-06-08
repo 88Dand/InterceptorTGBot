@@ -274,19 +274,125 @@ install_or_reinstall() {
   fi
 }
 
+show_config_value() {
+  local key="$1"
+
+  python3 - <<PY
+import json
+
+path = "$CONFIG_FILE"
+key = "$key"
+
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    value = config.get(key)
+
+    if isinstance(value, list):
+        print(", ".join(value))
+    else:
+        print(value)
+
+except Exception as e:
+    print(f"Ошибка чтения config.json: {e}")
+PY
+}
+
+set_config_value() {
+  local key="$1"
+  local type="$2"
+  local value="$3"
+
+  python3 - <<PY
+import json
+
+path = "$CONFIG_FILE"
+key = "$key"
+value = """$value"""
+value_type = "$type"
+
+with open(path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+if value_type == "int":
+    config[key] = int(value)
+elif value_type == "list":
+    config[key] = [x.strip() for x in value.split(",") if x.strip()]
+else:
+    config[key] = value
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
+PY
+
+  chmod 600 "$CONFIG_FILE"
+}
+
+edit_one_config_param() {
+  local key="$1"
+  local type="$2"
+  local title="$3"
+
+  echo
+  echo "Параметр: $title"
+  echo "Текущее значение:"
+  show_config_value "$key"
+  echo
+
+  read -rp "Новое значение: " new_value
+
+  if [[ -z "$new_value" ]]; then
+    echo "Пустое значение, изменение отменено."
+    return
+  fi
+
+  set_config_value "$key" "$type" "$new_value"
+  echo "Параметр изменён."
+}
+
 edit_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "config.json не найден. Создаю заново."
     ask_config
-  else
-    ${EDITOR:-nano} "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-    echo "Конфиг изменён."
-    read -rp "Перезапустить сервис? [y/N]: " restart_now
-    if [[ "$restart_now" =~ ^[YyДд]$ ]]; then
-      sudo systemctl restart "$SERVICE_NAME"
-    fi
+    return
   fi
+
+  while true; do
+    echo
+    echo "Настройки config.json"
+    echo "1) API_ID"
+    echo "2) API_HASH"
+    echo "3) PHONE"
+    echo "4) CHAT_LINK"
+    echo "5) ALARM_CHANNEL_LINK"
+    echo "6) KEYWORDS"
+    echo "7) EXCLUSIONS"
+    echo "8) MIN_RESPONSE_INTERVAL"
+    echo "9) REPLY_TEXT"
+    echo "10) Показать весь config.json"
+    echo "11) Перезапустить сервис"
+    echo "0) Назад"
+    echo
+
+    read -rp "Выберите параметр: " cfg_choice
+
+    case "$cfg_choice" in
+      1) edit_one_config_param "api_id" "int" "API_ID" ;;
+      2) edit_one_config_param "api_hash" "str" "API_HASH" ;;
+      3) edit_one_config_param "phone" "str" "PHONE" ;;
+      4) edit_one_config_param "chat_link" "str" "CHAT_LINK" ;;
+      5) edit_one_config_param "alarm_channel_link" "str" "ALARM_CHANNEL_LINK" ;;
+      6) edit_one_config_param "keywords" "list" "KEYWORDS, через запятую" ;;
+      7) edit_one_config_param "exclusions" "list" "EXCLUSIONS, через запятую" ;;
+      8) edit_one_config_param "min_response_interval" "int" "MIN_RESPONSE_INTERVAL" ;;
+      9) edit_one_config_param "reply_text" "str" "REPLY_TEXT" ;;
+      10) python3 -m json.tool "$CONFIG_FILE" ;;
+      11) sudo systemctl restart "$SERVICE_NAME"; echo "Сервис перезапущен." ;;
+      0) break ;;
+      *) echo "Неверный пункт" ;;
+    esac
+  done
 }
 
 diagnostics() {
