@@ -459,6 +459,13 @@ remove_bot() {
   sudo systemctl daemon-reload
   rm -rf "$APP_DIR"
 
+  read -rp "Удалить системные зависимости python3-venv python3-pip? [y/N]: " remove_deps
+
+  if [[ "$remove_deps" =~ ^[YyДд]$ ]]; then
+    sudo apt remove -y python3-venv python3-pip
+    sudo apt autoremove -y
+  fi
+
   echo "Удалено."
 }
 
