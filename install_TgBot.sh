@@ -37,6 +37,8 @@ ask_config() {
   read -rp "ALARM_CHANNEL_LINK: " ALARM_CHANNEL_LINK
   read -rp "MIN_RESPONSE_INTERVAL секунд [60]: " MIN_RESPONSE_INTERVAL
   MIN_RESPONSE_INTERVAL="${MIN_RESPONSE_INTERVAL:-60}"
+  read -rp "LOG_LEVEL [INFO] / DEBUG / WARNING / ERROR: " LOG_LEVEL
+  LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
   echo
   echo "Ключевые слова через запятую:"
@@ -61,6 +63,7 @@ config = {
     "keywords": split_csv("""$KEYWORDS_RAW"""),
     "exclusions": split_csv("""$EXCLUSIONS_RAW"""),
     "min_response_interval": int("$MIN_RESPONSE_INTERVAL"),
+    "log_level": "$LOG_LEVEL",
     "reply_text": "бронь, пожалуйста"
 }
 
@@ -88,15 +91,6 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOG_PATH = os.path.join(BASE_DIR, "bot.log")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
 
 logger = logging.getLogger(__name__)
 last_response_time = None
@@ -127,14 +121,47 @@ def load_config():
     config["keywords"] = [x.lower() for x in config.get("keywords", [])]
     config["exclusions"] = [x.lower() for x in config.get("exclusions", [])]
     config.setdefault("reply_text", "бронь, пожалуйста")
+    config.setdefault("log_level", "INFO")
 
     return config
 
 
+def setup_logging(config):
+    log_level_name = str(config.get("log_level", "INFO")).upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_PATH),
+            logging.StreamHandler(sys.stdout)
+        ],
+        force=True
+    )
+
+    # По умолчанию скрываем шумные INFO-логи Telethon:
+    # Got difference for account updates
+    # Got difference for channel ... updates
+    telethon_level = logging.WARNING
+
+    if log_level <= logging.DEBUG:
+        telethon_level = logging.INFO
+
+    logging.getLogger("telethon").setLevel(telethon_level)
+    logging.getLogger("telethon.network").setLevel(telethon_level)
+    logging.getLogger("telethon.client").setLevel(telethon_level)
+    logging.getLogger("telethon.extensions").setLevel(telethon_level)
+
+    return logging.getLogger(__name__)
+
+
 async def run_bot():
     global last_response_time
+    global logger
 
     config = load_config()
+    logger = setup_logging(config)
 
     client = TelegramClient(
         os.path.join(BASE_DIR, "session_name"),
@@ -220,7 +247,7 @@ PY
 }
 
 install_dependencies() {
-  sudo apt update
+  sudo apt update || true
   sudo apt install -y python3 python3-venv python3-pip
 
   python3 -m venv "$VENV_DIR"
@@ -370,8 +397,9 @@ edit_config() {
     echo "7) EXCLUSIONS"
     echo "8) MIN_RESPONSE_INTERVAL"
     echo "9) REPLY_TEXT"
-    echo "10) Показать весь config.json"
-    echo "11) Перезапустить сервис"
+    echo "10) LOG_LEVEL"
+    echo "11) Показать весь config.json"
+    echo "12) Перезапустить сервис"
     echo "0) Назад"
     echo
 
@@ -387,8 +415,9 @@ edit_config() {
       7) edit_one_config_param "exclusions" "list" "EXCLUSIONS, через запятую" ;;
       8) edit_one_config_param "min_response_interval" "int" "MIN_RESPONSE_INTERVAL" ;;
       9) edit_one_config_param "reply_text" "str" "REPLY_TEXT" ;;
-      10) python3 -m json.tool "$CONFIG_FILE" ;;
-      11) sudo systemctl restart "$SERVICE_NAME"; echo "Сервис перезапущен." ;;
+      10) edit_one_config_param "log_level" "str" "LOG_LEVEL: DEBUG / INFO / WARNING / ERROR" ;;
+      11) python3 -m json.tool "$CONFIG_FILE" ;;
+      12) sudo systemctl restart "$SERVICE_NAME"; echo "Сервис перезапущен." ;;
       0) break ;;
       *) echo "Неверный пункт" ;;
     esac
@@ -475,6 +504,7 @@ logs() {
 
 while true; do
   menu
+
   case "$choice" in
     1) install_or_reinstall ;;
     2) edit_config ;;
