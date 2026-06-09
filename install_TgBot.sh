@@ -269,7 +269,29 @@ async def safe_send_alarm(client, alarm_channel, chat, message_text, current_tim
     except Exception as e:
         logger.exception(f"Ошибка при отправке аларма: {e}")
 
+async def login_only():
+    global logger
 
+    config = load_config()
+    logger = setup_logging(config)
+
+    client = TelegramClient(
+        os.path.join(BASE_DIR, "session_name"),
+        config["api_id"],
+        config["api_hash"],
+        connection_retries=10,
+        retry_delay=3,
+        auto_reconnect=True,
+        timeout=30
+    )
+
+    try:
+        logger.warning("Подключение к Telegram для авторизации...")
+        await client.start(config["phone"])
+        me = await client.get_me()
+        logger.warning(f"Авторизация успешна: {getattr(me, 'first_name', '')} {getattr(me, 'last_name', '')}")
+    finally:
+        await client.disconnect()
 async def run_bot():
     global last_response_time
     global logger
@@ -361,7 +383,10 @@ async def run_bot():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(run_bot())
+        if "--login-only" in sys.argv:
+            asyncio.run(login_only())
+        else:
+            asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.warning("Бот остановлен пользователем")
 PY
@@ -475,7 +500,7 @@ telegram_login() {
   echo
 
   cd "$APP_DIR"
-  "$VENV_DIR/bin/python" "$BOT_FILE"
+"$VENV_DIR/bin/python" "$BOT_FILE" --login-only
 
   echo
   read -rp "Запустить сервис после авторизации? [Y/n]: " start_after_login
