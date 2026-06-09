@@ -7,10 +7,18 @@ CONFIG_FILE="$APP_DIR/config.json"
 VENV_DIR="$APP_DIR/venv"
 SERVICE_NAME="telegram-bot"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+SHORTCUT_FILE="$HOME/tg"
+BIN_SHORTCUT="/usr/local/bin/tg"
+
+pause() {
+  echo
+  read -rp "Нажмите Enter для возврата в меню..."
+}
 
 menu() {
-  echo
+  clear
   echo "Telegram Bot Manager"
+  echo "===================="
   echo "1) Установить / переустановить"
   echo "2) Изменить настройки config.json"
   echo "3) Запустить сервис"
@@ -20,9 +28,70 @@ menu() {
   echo "7) Логи"
   echo "8) Диагностика"
   echo "9) Удалить бота и сервис"
+  echo "10) Создать короткую команду tg"
   echo "0) Выход"
   echo
   read -rp "Выберите пункт: " choice
+}
+
+service_status_short() {
+  echo
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "[OK] Сервис запущен"
+  else
+    echo "[INFO] Сервис не запущен"
+  fi
+
+  if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+    echo "[OK] Автозапуск включён"
+  else
+    echo "[INFO] Автозапуск не включён"
+  fi
+}
+
+start_service() {
+  echo "[INFO] Запускаю сервис..."
+  if sudo systemctl start "$SERVICE_NAME"; then
+    echo "[OK] Команда запуска выполнена"
+  else
+    echo "[ERROR] Не удалось запустить сервис"
+  fi
+
+  service_status_short
+  echo
+  sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
+  pause
+}
+
+stop_service() {
+  echo "[INFO] Останавливаю сервис..."
+  if sudo systemctl stop "$SERVICE_NAME"; then
+    echo "[OK] Команда остановки выполнена"
+  else
+    echo "[ERROR] Не удалось остановить сервис"
+  fi
+
+  service_status_short
+  pause
+}
+
+restart_service() {
+  echo "[INFO] Перезапускаю сервис..."
+  if sudo systemctl restart "$SERVICE_NAME"; then
+    echo "[OK] Команда перезапуска выполнена"
+  else
+    echo "[ERROR] Не удалось перезапустить сервис"
+  fi
+
+  service_status_short
+  echo
+  sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
+  pause
+}
+
+show_status() {
+  sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
+  pause
 }
 
 ask_config() {
@@ -30,15 +99,30 @@ ask_config() {
 
   echo
   echo "Введите параметры Telegram API и бота."
-  read -rp "API_ID: " API_ID
+  echo "API_ID — это число из https://my.telegram.org/apps, не username бота."
+  echo
+
+  while true; do
+    read -rp "API_ID: " API_ID
+    if [[ "$API_ID" =~ ^[0-9]+$ ]]; then
+      break
+    fi
+    echo "Ошибка: API_ID должен быть числом, например 24929241"
+  done
+
   read -rp "API_HASH: " API_HASH
   read -rp "PHONE, например +79000000000: " PHONE
   read -rp "CHAT_LINK, например https://t.me/besplatnomp: " CHAT_LINK
   read -rp "ALARM_CHANNEL_LINK: " ALARM_CHANNEL_LINK
+
   read -rp "MIN_RESPONSE_INTERVAL секунд [60]: " MIN_RESPONSE_INTERVAL
   MIN_RESPONSE_INTERVAL="${MIN_RESPONSE_INTERVAL:-60}"
-  read -rp "LOG_LEVEL [INFO] / DEBUG / WARNING / ERROR: " LOG_LEVEL
-  LOG_LEVEL="${LOG_LEVEL:-INFO}"
+
+  read -rp "LOG_LEVEL [WARNING] / DEBUG / INFO / ERROR: " LOG_LEVEL
+  LOG_LEVEL="${LOG_LEVEL:-WARNING}"
+
+  read -rp "REPLY_TEXT [бронь, пожалуйста]: " REPLY_TEXT
+  REPLY_TEXT="${REPLY_TEXT:-бронь, пожалуйста}"
 
   echo
   echo "Ключевые слова через запятую:"
@@ -48,31 +132,44 @@ ask_config() {
   echo "Слова-исключения через запятую:"
   read -rp "> " EXCLUSIONS_RAW
 
-  python3 - <<PY
+  API_ID="$API_ID" \
+  API_HASH="$API_HASH" \
+  PHONE="$PHONE" \
+  CHAT_LINK="$CHAT_LINK" \
+  ALARM_CHANNEL_LINK="$ALARM_CHANNEL_LINK" \
+  MIN_RESPONSE_INTERVAL="$MIN_RESPONSE_INTERVAL" \
+  LOG_LEVEL="$LOG_LEVEL" \
+  REPLY_TEXT="$REPLY_TEXT" \
+  KEYWORDS_RAW="$KEYWORDS_RAW" \
+  EXCLUSIONS_RAW="$EXCLUSIONS_RAW" \
+  CONFIG_FILE="$CONFIG_FILE" \
+  python3 - <<'PY'
 import json
+import os
 
 def split_csv(s):
     return [x.strip() for x in s.split(",") if x.strip()]
 
 config = {
-    "api_id": int("$API_ID"),
-    "api_hash": "$API_HASH",
-    "phone": "$PHONE",
-    "chat_link": "$CHAT_LINK",
-    "alarm_channel_link": "$ALARM_CHANNEL_LINK",
-    "keywords": split_csv("""$KEYWORDS_RAW"""),
-    "exclusions": split_csv("""$EXCLUSIONS_RAW"""),
-    "min_response_interval": int("$MIN_RESPONSE_INTERVAL"),
-    "log_level": "$LOG_LEVEL",
-    "reply_text": "бронь, пожалуйста"
+    "api_id": int(os.environ["API_ID"]),
+    "api_hash": os.environ["API_HASH"],
+    "phone": os.environ["PHONE"],
+    "chat_link": os.environ["CHAT_LINK"],
+    "alarm_channel_link": os.environ["ALARM_CHANNEL_LINK"],
+    "keywords": split_csv(os.environ["KEYWORDS_RAW"]),
+    "exclusions": split_csv(os.environ["EXCLUSIONS_RAW"]),
+    "min_response_interval": int(os.environ["MIN_RESPONSE_INTERVAL"]),
+    "log_level": os.environ["LOG_LEVEL"].upper(),
+    "reply_text": os.environ["REPLY_TEXT"]
 }
 
-with open("$CONFIG_FILE", "w", encoding="utf-8") as f:
+with open(os.environ["CONFIG_FILE"], "w", encoding="utf-8") as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
+    f.write("\n")
 PY
 
   chmod 600 "$CONFIG_FILE"
-  echo "Конфиг сохранён: $CONFIG_FILE"
+  echo "[OK] Конфиг сохранён: $CONFIG_FILE"
 }
 
 write_bot() {
@@ -80,6 +177,7 @@ write_bot() {
 
   cat > "$BOT_FILE" <<'PY'
 from telethon import TelegramClient, events
+from telethon.errors import ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError
 import asyncio
 import random
 from datetime import datetime
@@ -121,14 +219,14 @@ def load_config():
     config["keywords"] = [x.lower() for x in config.get("keywords", [])]
     config["exclusions"] = [x.lower() for x in config.get("exclusions", [])]
     config.setdefault("reply_text", "бронь, пожалуйста")
-    config.setdefault("log_level", "INFO")
+    config.setdefault("log_level", "WARNING")
 
     return config
 
 
 def setup_logging(config):
-    log_level_name = str(config.get("log_level", "INFO")).upper()
-    log_level = getattr(logging, log_level_name, logging.INFO)
+    log_level_name = str(config.get("log_level", "WARNING")).upper()
+    log_level = getattr(logging, log_level_name, logging.WARNING)
 
     logging.basicConfig(
         level=log_level,
@@ -149,11 +247,26 @@ def setup_logging(config):
         telethon_level = logging.INFO
 
     logging.getLogger("telethon").setLevel(telethon_level)
-    logging.getLogger("telethon.network").setLevel(telethon_level)
-    logging.getLogger("telethon.client").setLevel(telethon_level)
-    logging.getLogger("telethon.extensions").setLevel(telethon_level)
 
     return logging.getLogger(__name__)
+
+
+async def safe_send_alarm(client, alarm_channel, chat, message_text, current_time, reason_text=None):
+    try:
+        alarm_msg = (
+            f"Аларм! Сработало ключевое слово в чате {getattr(chat, 'title', chat.id)}\n"
+            f"Сообщение: {message_text[:300]}{'...' if len(message_text) > 300 else ''}\n"
+            f"Время: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        if reason_text:
+            alarm_msg += f"\nОтвет в исходный чат не отправлен: {reason_text}"
+
+        await client.send_message(alarm_channel, alarm_msg)
+        logger.info("Отправлено аларм-сообщение")
+
+    except Exception as e:
+        logger.exception(f"Ошибка при отправке аларма: {e}")
 
 
 async def run_bot():
@@ -174,16 +287,16 @@ async def run_bot():
     )
 
     try:
-        logger.info("Подключение к Telegram...")
+        logger.warning("Подключение к Telegram...")
         await client.start(config["phone"])
-        logger.info("Успешная авторизация")
+        logger.warning("Успешная авторизация")
 
         me = await client.get_me()
         chat = await client.get_entity(config["chat_link"])
         alarm_channel = await client.get_entity(config["alarm_channel_link"])
 
-        logger.info(f"Подключено к чату: {getattr(chat, 'title', chat.id)}")
-        logger.info(f"Подключено к каналу: {getattr(alarm_channel, 'title', alarm_channel.id)}")
+        logger.warning(f"Подключено к чату: {getattr(chat, 'title', chat.id)}")
+        logger.warning(f"Подключено к каналу: {getattr(alarm_channel, 'title', alarm_channel.id)}")
 
         @client.on(events.NewMessage(chats=chat))
         async def message_handler(event):
@@ -205,28 +318,37 @@ async def run_bot():
             has_keyword = any(k in message_text for k in config["keywords"])
             has_exclusion = any(e in message_text for e in config["exclusions"])
 
-            if has_keyword and not has_exclusion:
-                last_response_time = current_time
-                delay = random.uniform(3, 6)
-                await asyncio.sleep(delay)
+            if not has_keyword or has_exclusion:
+                return
 
-                try:
-                    await event.reply(config["reply_text"])
-                    logger.info(f"Отправлен ответ на сообщение: {message_text[:80]}")
+            last_response_time = current_time
+            delay = random.uniform(3, 6)
+            await asyncio.sleep(delay)
 
-                    alarm_msg = (
-                        f"Аларм! Сработало ключевое слово в чате {getattr(chat, 'title', chat.id)}\n"
-                        f"Сообщение: {message_text[:300]}{'...' if len(message_text) > 300 else ''}\n"
-                        f"Время: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
+            reply_error = None
 
-                    await client.send_message(alarm_channel, alarm_msg)
-                    logger.info("Отправлено аларм-сообщение")
+            try:
+                await event.reply(config["reply_text"])
+                logger.warning(f"Отправлен ответ на сообщение: {message_text[:80]}")
 
-                except Exception as e:
-                    logger.exception(f"Ошибка при отправке: {e}")
+            except (ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError) as e:
+                reply_error = "нет прав на отправку сообщения в исходный чат"
+                logger.warning(f"Не удалось ответить в исходный чат: {e}")
 
-        logger.info("Автоответчик запущен. Ожидание сообщений...")
+            except Exception as e:
+                reply_error = str(e)
+                logger.exception(f"Ошибка при ответе в исходный чат: {e}")
+
+            await safe_send_alarm(
+                client=client,
+                alarm_channel=alarm_channel,
+                chat=chat,
+                message_text=message_text,
+                current_time=current_time,
+                reason_text=reply_error
+            )
+
+        logger.warning("Автоответчик запущен. Ожидание сообщений...")
         await client.run_until_disconnected()
 
     except Exception as e:
@@ -240,19 +362,23 @@ if __name__ == "__main__":
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
+        logger.warning("Бот остановлен пользователем")
 PY
 
   chmod +x "$BOT_FILE"
 }
 
 install_dependencies() {
-  sudo apt update || true
+  echo "[INFO] Установка зависимостей..."
+
+  sudo apt update
   sudo apt install -y python3 python3-venv python3-pip
 
   python3 -m venv "$VENV_DIR"
   "$VENV_DIR/bin/pip" install --upgrade pip
   "$VENV_DIR/bin/pip" install telethon
+
+  echo "[OK] Зависимости установлены"
 }
 
 write_service() {
@@ -276,10 +402,11 @@ EOF
 
   sudo systemctl daemon-reload
   sudo systemctl enable "$SERVICE_NAME"
+  echo "[OK] systemd-сервис создан и добавлен в автозапуск"
 }
 
 install_or_reinstall() {
-  echo "Установка / переустановка..."
+  echo "[INFO] Установка / переустановка..."
 
   sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
@@ -291,24 +418,28 @@ install_or_reinstall() {
   echo
   echo "Первый запуск может запросить код Telegram."
   echo "Рекомендуется сначала запустить вручную:"
+  echo
   echo "cd $APP_DIR && $VENV_DIR/bin/python $BOT_FILE"
   echo
   read -rp "Запустить сервис сейчас? [y/N]: " start_now
 
   if [[ "$start_now" =~ ^[YyДд]$ ]]; then
     sudo systemctl restart "$SERVICE_NAME"
-    sudo systemctl status "$SERVICE_NAME" --no-pager
+    sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
   fi
+
+  pause
 }
 
 show_config_value() {
   local key="$1"
 
-  python3 - <<PY
+  CONFIG_FILE="$CONFIG_FILE" KEY="$key" python3 - <<'PY'
 import json
+import os
 
-path = "$CONFIG_FILE"
-key = "$key"
+path = os.environ["CONFIG_FILE"]
+key = os.environ["KEY"]
 
 try:
     with open(path, "r", encoding="utf-8") as f:
@@ -328,16 +459,17 @@ PY
 
 set_config_value() {
   local key="$1"
-  local type="$2"
+  local value_type="$2"
   local value="$3"
 
-  python3 - <<PY
+  CONFIG_FILE="$CONFIG_FILE" KEY="$key" VALUE_TYPE="$value_type" VALUE="$value" python3 - <<'PY'
 import json
+import os
 
-path = "$CONFIG_FILE"
-key = "$key"
-value = """$value"""
-value_type = "$type"
+path = os.environ["CONFIG_FILE"]
+key = os.environ["KEY"]
+value = os.environ["VALUE"]
+value_type = os.environ["VALUE_TYPE"]
 
 with open(path, "r", encoding="utf-8") as f:
     config = json.load(f)
@@ -351,6 +483,7 @@ else:
 
 with open(path, "w", encoding="utf-8") as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
+    f.write("\n")
 PY
 
   chmod 600 "$CONFIG_FILE"
@@ -358,7 +491,7 @@ PY
 
 edit_one_config_param() {
   local key="$1"
-  local type="$2"
+  local value_type="$2"
   local title="$3"
 
   echo
@@ -374,20 +507,44 @@ edit_one_config_param() {
     return
   fi
 
-  set_config_value "$key" "$type" "$new_value"
-  echo "Параметр изменён."
+  if [[ "$value_type" == "int" && ! "$new_value" =~ ^[0-9]+$ ]]; then
+    echo "Ошибка: значение должно быть числом."
+    return
+  fi
+
+  set_config_value "$key" "$value_type" "$new_value"
+  echo "[OK] Параметр изменён."
+}
+
+show_full_config() {
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "config.json не найден"
+    return
+  fi
+
+  CONFIG_FILE="$CONFIG_FILE" python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["CONFIG_FILE"], "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+print(json.dumps(config, ensure_ascii=False, indent=2))
+PY
 }
 
 edit_config() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "config.json не найден. Создаю заново."
     ask_config
+    pause
     return
   fi
 
   while true; do
-    echo
+    clear
     echo "Настройки config.json"
+    echo "===================="
     echo "1) API_ID"
     echo "2) API_HASH"
     echo "3) PHONE"
@@ -406,20 +563,60 @@ edit_config() {
     read -rp "Выберите параметр: " cfg_choice
 
     case "$cfg_choice" in
-      1) edit_one_config_param "api_id" "int" "API_ID" ;;
-      2) edit_one_config_param "api_hash" "str" "API_HASH" ;;
-      3) edit_one_config_param "phone" "str" "PHONE" ;;
-      4) edit_one_config_param "chat_link" "str" "CHAT_LINK" ;;
-      5) edit_one_config_param "alarm_channel_link" "str" "ALARM_CHANNEL_LINK" ;;
-      6) edit_one_config_param "keywords" "list" "KEYWORDS, через запятую" ;;
-      7) edit_one_config_param "exclusions" "list" "EXCLUSIONS, через запятую" ;;
-      8) edit_one_config_param "min_response_interval" "int" "MIN_RESPONSE_INTERVAL" ;;
-      9) edit_one_config_param "reply_text" "str" "REPLY_TEXT" ;;
-      10) edit_one_config_param "log_level" "str" "LOG_LEVEL: DEBUG / INFO / WARNING / ERROR" ;;
-      11) python3 -m json.tool "$CONFIG_FILE" ;;
-      12) sudo systemctl restart "$SERVICE_NAME"; echo "Сервис перезапущен." ;;
+      1) edit_one_config_param "api_id" "int" "API_ID" ; pause ;;
+      2) edit_one_config_param "api_hash" "str" "API_HASH" ; pause ;;
+      3) edit_one_config_param "phone" "str" "PHONE" ; pause ;;
+      4) edit_one_config_param "chat_link" "str" "CHAT_LINK" ; pause ;;
+      5) edit_one_config_param "alarm_channel_link" "str" "ALARM_CHANNEL_LINK" ; pause ;;
+      6) edit_one_config_param "keywords" "list" "KEYWORDS, через запятую" ; pause ;;
+      7) edit_one_config_param "exclusions" "list" "EXCLUSIONS, через запятую" ; pause ;;
+      8) edit_one_config_param "min_response_interval" "int" "MIN_RESPONSE_INTERVAL" ; pause ;;
+      9) edit_one_config_param "reply_text" "str" "REPLY_TEXT" ; pause ;;
+      10) edit_one_config_param "log_level" "str" "LOG_LEVEL: DEBUG / INFO / WARNING / ERROR" ; pause ;;
+      11) show_full_config ; pause ;;
+      12) restart_service ;;
       0) break ;;
-      *) echo "Неверный пункт" ;;
+      *) echo "Неверный пункт" ; pause ;;
+    esac
+  done
+}
+
+logs_menu() {
+  while true; do
+    clear
+    echo "Логи"
+    echo "===="
+    echo "1) Показать последние 50 строк и вернуться в меню"
+    echo "2) Показать последние 200 строк и вернуться в меню"
+    echo "3) Смотреть логи в реальном времени"
+    echo "0) Назад"
+    echo
+
+    read -rp "Выберите пункт: " log_choice
+
+    case "$log_choice" in
+      1)
+        journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+        pause
+        ;;
+      2)
+        journalctl -u "$SERVICE_NAME" -n 200 --no-pager || true
+        pause
+        ;;
+      3)
+        echo
+        echo "Режим реального времени. Для выхода нажмите Ctrl+C."
+        echo "После выхода запустите скрипт снова командой: sh tg или tg"
+        echo
+        journalctl -u "$SERVICE_NAME" -f --no-pager || true
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo "Неверный пункт"
+        pause
+        ;;
     esac
   done
 }
@@ -459,18 +656,29 @@ PY
   echo
   echo "5. config.json:"
   if [[ -f "$CONFIG_FILE" ]]; then
-    python3 -m json.tool "$CONFIG_FILE" >/dev/null && echo "JSON корректный" || echo "JSON повреждён"
+    python3 - <<PY
+import json
+path = "$CONFIG_FILE"
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        json.load(f)
+    print("JSON корректный")
+except Exception as e:
+    print(f"JSON повреждён: {e}")
+PY
   else
     echo "config.json не найден"
   fi
 
   echo
   echo "6. systemd service:"
-  systemctl status "$SERVICE_NAME" --no-pager || true
+  systemctl status "$SERVICE_NAME" --no-pager -l || true
 
   echo
   echo "7. Последние логи:"
   journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+
+  pause
 }
 
 remove_bot() {
@@ -479,6 +687,7 @@ remove_bot() {
 
   if [[ ! "$confirm" =~ ^[YyДд]$ ]]; then
     echo "Отменено."
+    pause
     return
   fi
 
@@ -495,11 +704,43 @@ remove_bot() {
     sudo apt autoremove -y
   fi
 
-  echo "Удалено."
+  echo "[OK] Удалено."
+  pause
 }
 
-logs() {
-  journalctl -u "$SERVICE_NAME" -f --no-pager
+create_shortcut() {
+  local current_script
+  current_script="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+  cp "$current_script" "$SHORTCUT_FILE"
+  chmod +x "$SHORTCUT_FILE"
+
+  echo "[OK] Создан файл: $SHORTCUT_FILE"
+  echo "Теперь можно запускать так:"
+  echo
+  echo "sh ~/tg"
+  echo
+
+  if [[ $EUID -eq 0 ]]; then
+    cp "$current_script" "$BIN_SHORTCUT"
+    chmod +x "$BIN_SHORTCUT"
+    echo "[OK] Также создана команда: $BIN_SHORTCUT"
+    echo "Можно запускать так:"
+    echo
+    echo "tg"
+  else
+    read -rp "Создать системную команду tg через sudo? [y/N]: " make_bin
+    if [[ "$make_bin" =~ ^[YyДд]$ ]]; then
+      sudo cp "$current_script" "$BIN_SHORTCUT"
+      sudo chmod +x "$BIN_SHORTCUT"
+      echo "[OK] Создана команда: $BIN_SHORTCUT"
+      echo "Можно запускать так:"
+      echo
+      echo "tg"
+    fi
+  fi
+
+  pause
 }
 
 while true; do
@@ -508,14 +749,15 @@ while true; do
   case "$choice" in
     1) install_or_reinstall ;;
     2) edit_config ;;
-    3) sudo systemctl start "$SERVICE_NAME" ;;
-    4) sudo systemctl stop "$SERVICE_NAME" ;;
-    5) sudo systemctl restart "$SERVICE_NAME" ;;
-    6) sudo systemctl status "$SERVICE_NAME" --no-pager ;;
-    7) logs ;;
+    3) start_service ;;
+    4) stop_service ;;
+    5) restart_service ;;
+    6) show_status ;;
+    7) logs_menu ;;
     8) diagnostics ;;
     9) remove_bot ;;
+    10) create_shortcut ;;
     0) exit 0 ;;
-    *) echo "Неверный пункт" ;;
+    *) echo "Неверный пункт" ; pause ;;
   esac
 done
