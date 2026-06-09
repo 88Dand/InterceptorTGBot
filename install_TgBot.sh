@@ -411,10 +411,17 @@ install_or_reinstall() {
 
   sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
-  install_dependencies
+install_dependencies
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "[INFO] config.json не найден — выполняется первичная настройка."
   ask_config
-  write_bot
-  write_service
+else
+  echo "[OK] Найден существующий config.json — при переустановке он не будет перезаписан."
+fi
+
+write_bot
+write_service
 
   echo
   echo "Первый запуск может запросить код Telegram."
