@@ -23,6 +23,7 @@ wget -O install.sh https://raw.githubusercontent.com/88Dand/InterceptorTGBot/mai
 
 ```
 Меню для работы:
+
 Telegram Bot Manager
 ====================
 1) Установить / переустановить
