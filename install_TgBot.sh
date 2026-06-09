@@ -29,6 +29,7 @@ menu() {
   echo "8) Диагностика"
   echo "9) Удалить бота и сервис"
   echo "10) Создать короткую команду tg"
+  echo "11) Авторизация Telegram / ввод кода"
   echo "0) Выход"
   echo
   read -rp "Выберите пункт: " choice
@@ -421,7 +422,15 @@ install_or_reinstall() {
   echo
   echo "cd $APP_DIR && $VENV_DIR/bin/python $BOT_FILE"
   echo
-  read -rp "Запустить сервис сейчас? [y/N]: " start_now
+read -rp "Выполнить авторизацию Telegram сейчас? [Y/n]: " do_login
+do_login="${do_login:-Y}"
+
+if [[ "$do_login" =~ ^[YyДд]$ ]]; then
+  telegram_login
+  return
+fi
+
+read -rp "Запустить сервис сейчас? [y/N]: " start_now
 
   if [[ "$start_now" =~ ^[YyДд]$ ]]; then
     sudo systemctl restart "$SERVICE_NAME"
@@ -430,7 +439,48 @@ install_or_reinstall() {
 
   pause
 }
+telegram_login() {
+  if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    echo "[ERROR] venv не найден. Сначала выполните установку."
+    pause
+    return
+  fi
 
+  if [[ ! -f "$BOT_FILE" ]]; then
+    echo "[ERROR] bot.py не найден. Сначала выполните установку."
+    pause
+    return
+  fi
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[ERROR] config.json не найден. Сначала создайте настройки."
+    pause
+    return
+  fi
+
+  echo "[INFO] Останавливаю сервис перед авторизацией..."
+  sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+
+  echo
+  echo "Сейчас будет запущен интерактивный вход Telegram."
+  echo "Если Telegram пришлёт код — введите его в консоль."
+  echo "Если включён пароль 2FA — Telethon также запросит пароль."
+  echo
+
+  cd "$APP_DIR"
+  "$VENV_DIR/bin/python" "$BOT_FILE"
+
+  echo
+  read -rp "Запустить сервис после авторизации? [Y/n]: " start_after_login
+  start_after_login="${start_after_login:-Y}"
+
+  if [[ "$start_after_login" =~ ^[YyДд]$ ]]; then
+    sudo systemctl restart "$SERVICE_NAME"
+    sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
+  fi
+
+  pause
+}
 show_config_value() {
   local key="$1"
 
@@ -757,6 +807,7 @@ while true; do
     8) diagnostics ;;
     9) remove_bot ;;
     10) create_shortcut ;;
+	11) telegram_login ;;
     0) exit 0 ;;
     *) echo "Неверный пункт" ; pause ;;
   esac
