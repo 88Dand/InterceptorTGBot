@@ -22,3 +22,19 @@
 wget -O install.sh https://raw.githubusercontent.com/88Dand/InterceptorTGBot/main/install_TgBot.sh && chmod +x install.sh && ./install.sh
 
 ```
+Меню для работы:
+Telegram Bot Manager
+====================
+1) Установить / переустановить
+2) Изменить настройки config.json
+3) Запустить сервис
+4) Остановить сервис
+5) Перезапустить сервис
+6) Статус сервиса
+7) Логи
+8) Диагностика
+9) Удалить бота и сервис
+10) Создать короткую команду tg
+11) Авторизация Telegram / ввод кода
+0) Выход
+
