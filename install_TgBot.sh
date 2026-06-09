@@ -125,6 +125,9 @@ ask_config() {
   read -rp "REPLY_TEXT [бронь, пожалуйста]: " REPLY_TEXT
   REPLY_TEXT="${REPLY_TEXT:-бронь, пожалуйста}"
 
+  read -rp "IGNORE_OWN_MESSAGES — игнорировать свои сообщения? [Y/n]: " IGNORE_OWN_MESSAGES
+  IGNORE_OWN_MESSAGES="${IGNORE_OWN_MESSAGES:-Y}"
+
   echo
   echo "Ключевые слова через запятую:"
   read -rp "> " KEYWORDS_RAW
@@ -141,6 +144,7 @@ ask_config() {
   MIN_RESPONSE_INTERVAL="$MIN_RESPONSE_INTERVAL" \
   LOG_LEVEL="$LOG_LEVEL" \
   REPLY_TEXT="$REPLY_TEXT" \
+  IGNORE_OWN_MESSAGES="$IGNORE_OWN_MESSAGES" \
   KEYWORDS_RAW="$KEYWORDS_RAW" \
   EXCLUSIONS_RAW="$EXCLUSIONS_RAW" \
   CONFIG_FILE="$CONFIG_FILE" \
@@ -161,7 +165,8 @@ config = {
     "exclusions": split_csv(os.environ["EXCLUSIONS_RAW"]),
     "min_response_interval": int(os.environ["MIN_RESPONSE_INTERVAL"]),
     "log_level": os.environ["LOG_LEVEL"].upper(),
-    "reply_text": os.environ["REPLY_TEXT"]
+    "reply_text": os.environ["REPLY_TEXT"],
+    "ignore_own_messages": os.environ["IGNORE_OWN_MESSAGES"].lower() in ("1", "true", "yes", "y", "да", "д")
 }
 
 with open(os.environ["CONFIG_FILE"], "w", encoding="utf-8") as f:
@@ -221,6 +226,7 @@ def load_config():
     config["exclusions"] = [x.lower() for x in config.get("exclusions", [])]
     config.setdefault("reply_text", "бронь, пожалуйста")
     config.setdefault("log_level", "WARNING")
+    config.setdefault("ignore_own_messages", True)
 
     return config
 
@@ -269,6 +275,7 @@ async def safe_send_alarm(client, alarm_channel, chat, message_text, current_tim
     except Exception as e:
         logger.exception(f"Ошибка при отправке аларма: {e}")
 
+
 async def login_only():
     global logger
 
@@ -292,6 +299,8 @@ async def login_only():
         logger.warning(f"Авторизация успешна: {getattr(me, 'first_name', '')} {getattr(me, 'last_name', '')}")
     finally:
         await client.disconnect()
+
+
 async def run_bot():
     global last_response_time
     global logger
@@ -325,7 +334,7 @@ async def run_bot():
         async def message_handler(event):
             global last_response_time
 
-            if event.sender_id == me.id:
+            if config.get("ignore_own_messages", True) and event.sender_id == me.id:
                 return
 
             current_time = datetime.now()
@@ -436,17 +445,17 @@ install_or_reinstall() {
 
   sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
-install_dependencies
+  install_dependencies
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  echo "[INFO] config.json не найден — выполняется первичная настройка."
-  ask_config
-else
-  echo "[OK] Найден существующий config.json — при переустановке он не будет перезаписан."
-fi
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[INFO] config.json не найден — выполняется первичная настройка."
+    ask_config
+  else
+    echo "[OK] Найден существующий config.json — при переустановке он не будет перезаписан."
+  fi
 
-write_bot
-write_service
+  write_bot
+  write_service
 
   echo
   echo "Первый запуск может запросить код Telegram."
@@ -454,15 +463,15 @@ write_service
   echo
   echo "cd $APP_DIR && $VENV_DIR/bin/python $BOT_FILE"
   echo
-read -rp "Выполнить авторизацию Telegram сейчас? [Y/n]: " do_login
-do_login="${do_login:-Y}"
+  read -rp "Выполнить авторизацию Telegram сейчас? [Y/n]: " do_login
+  do_login="${do_login:-Y}"
 
-if [[ "$do_login" =~ ^[YyДд]$ ]]; then
-  telegram_login
-  return
-fi
+  if [[ "$do_login" =~ ^[YyДд]$ ]]; then
+    telegram_login
+    return
+  fi
 
-read -rp "Запустить сервис сейчас? [y/N]: " start_now
+  read -rp "Запустить сервис сейчас? [y/N]: " start_now
 
   if [[ "$start_now" =~ ^[YyДд]$ ]]; then
     sudo systemctl restart "$SERVICE_NAME"
@@ -500,7 +509,7 @@ telegram_login() {
   echo
 
   cd "$APP_DIR"
-"$VENV_DIR/bin/python" "$BOT_FILE" --login-only
+  "$VENV_DIR/bin/python" "$BOT_FILE" --login-only
 
   echo
   read -rp "Запустить сервис после авторизации? [Y/n]: " start_after_login
@@ -531,6 +540,8 @@ try:
 
     if isinstance(value, list):
         print(", ".join(value))
+    elif isinstance(value, bool):
+        print("Да" if value else "Нет")
     else:
         print(value)
 
@@ -558,6 +569,8 @@ with open(path, "r", encoding="utf-8") as f:
 
 if value_type == "int":
     config[key] = int(value)
+elif value_type == "bool":
+    config[key] = value.lower() in ("1", "true", "yes", "y", "да", "д")
 elif value_type == "list":
     config[key] = [x.strip() for x in value.split(",") if x.strip()]
 else:
@@ -591,6 +604,11 @@ edit_one_config_param() {
 
   if [[ "$value_type" == "int" && ! "$new_value" =~ ^[0-9]+$ ]]; then
     echo "Ошибка: значение должно быть числом."
+    return
+  fi
+
+  if [[ "$value_type" == "bool" && ! "$new_value" =~ ^(1|0|true|false|yes|no|y|n|да|нет|д|н)$ ]]; then
+    echo "Ошибка: введите true/false, yes/no, 1/0 или да/нет."
     return
   fi
 
@@ -637,8 +655,9 @@ edit_config() {
     echo "8) MIN_RESPONSE_INTERVAL"
     echo "9) REPLY_TEXT"
     echo "10) LOG_LEVEL"
-    echo "11) Показать весь config.json"
-    echo "12) Перезапустить сервис"
+    echo "11) IGNORE_OWN_MESSAGES"
+    echo "12) Показать весь config.json"
+    echo "13) Перезапустить сервис"
     echo "0) Назад"
     echo
 
@@ -655,8 +674,9 @@ edit_config() {
       8) edit_one_config_param "min_response_interval" "int" "MIN_RESPONSE_INTERVAL" ; pause ;;
       9) edit_one_config_param "reply_text" "str" "REPLY_TEXT" ; pause ;;
       10) edit_one_config_param "log_level" "str" "LOG_LEVEL: DEBUG / INFO / WARNING / ERROR" ; pause ;;
-      11) show_full_config ; pause ;;
-      12) restart_service ;;
+      11) edit_one_config_param "ignore_own_messages" "bool" "IGNORE_OWN_MESSAGES: true/false. true = игнорировать свои сообщения, false = реагировать на свои сообщения" ; pause ;;
+      12) show_full_config ; pause ;;
+      13) restart_service ;;
       0) break ;;
       *) echo "Неверный пункт" ; pause ;;
     esac
@@ -839,7 +859,7 @@ while true; do
     8) diagnostics ;;
     9) remove_bot ;;
     10) create_shortcut ;;
-	11) telegram_login ;;
+    11) telegram_login ;;
     0) exit 0 ;;
     *) echo "Неверный пункт" ; pause ;;
   esac
