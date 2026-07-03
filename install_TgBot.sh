@@ -186,11 +186,12 @@ from telethon import TelegramClient, events
 from telethon.errors import ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError
 import asyncio
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import json
 import os
 import sys
+import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -198,6 +199,9 @@ LOG_PATH = os.path.join(BASE_DIR, "bot.log")
 
 logger = logging.getLogger(__name__)
 last_response_time = None
+# Счетчик перезапусков для экспоненциальной задержки
+restart_attempt = 0
+last_restart_time = None
 
 
 def load_config():
@@ -227,6 +231,8 @@ def load_config():
     config.setdefault("reply_text", "бронь, пожалуйста")
     config.setdefault("log_level", "WARNING")
     config.setdefault("ignore_own_messages", True)
+    config.setdefault("max_reconnect_attempts", 20)  # Максимум попыток переподключения
+    config.setdefault("reconnect_delay_base", 5)    # Базовая задержка между попытками
 
     return config
 
@@ -245,11 +251,8 @@ def setup_logging(config):
         force=True
     )
 
-    # По умолчанию скрываем шумные INFO-логи Telethon:
-    # Got difference for account updates
-    # Got difference for channel ... updates
+    # По умолчанию скрываем шумные INFO-логи Telethon
     telethon_level = logging.WARNING
-
     if log_level <= logging.DEBUG:
         telethon_level = logging.INFO
 
@@ -301,93 +304,158 @@ async def login_only():
         await client.disconnect()
 
 
-async def run_bot():
-    global last_response_time
-    global logger
+async def reconnect_with_backoff():
+    """Экспоненциальная задержка при повторных переподключениях"""
+    global restart_attempt, last_restart_time
+    
+    restart_attempt += 1
+    current_time = time.time()
+    
+    # Сбрасываем счетчик, если прошло больше часа с последнего сбоя
+    if last_restart_time and (current_time - last_restart_time) > 3600:
+        restart_attempt = 0
+    
+    last_restart_time = current_time
+    
+    # Экспоненциальная задержка: 5, 10, 20, 40, 80, 120 секунд (максимум 2 минуты)
+    delay = min(5 * (2 ** (restart_attempt - 1)), 120)
+    logger.warning(f"Пауза перед переподключением: {delay} секунд (попытка #{restart_attempt})")
+    await asyncio.sleep(delay)
 
-    config = load_config()
-    logger = setup_logging(config)
 
-    client = TelegramClient(
-        os.path.join(BASE_DIR, "session_name"),
-        config["api_id"],
-        config["api_hash"],
-        connection_retries=10,
-        retry_delay=3,
-        auto_reconnect=True,
-        timeout=30
-    )
+async def run_bot_with_reconnect():
+    """Основной цикл с бесконечными попытками переподключения"""
+    global last_response_time, logger, restart_attempt
+    
+    # Сбрасываем счетчик при первом запуске
+    restart_attempt = 0
+    
+    while True:
+        try:
+            config = load_config()
+            logger = setup_logging(config)
+            
+            # Создаем клиента с улучшенными настройками
+            client = TelegramClient(
+                os.path.join(BASE_DIR, "session_name"),
+                config["api_id"],
+                config["api_hash"],
+                connection_retries=5,          # Уменьшаем, чтобы быстрее переключаться на наш механизм
+                retry_delay=2,                 # Меньше ждем между попытками внутри Telethon
+                auto_reconnect=True,
+                timeout=15,                    # Уменьшаем таймаут для быстрого обнаружения проблем
+                flood_sleep_threshold=0,       # Отключаем задержки при флуде
+            )
+            
+            logger.warning("Подключение к Telegram...")
+            await client.start(config["phone"])
+            
+            # Сброс счетчика при успешном подключении
+            restart_attempt = 0
+            
+            logger.warning("Успешная авторизация")
 
-    try:
-        logger.warning("Подключение к Telegram...")
-        await client.start(config["phone"])
-        logger.warning("Успешная авторизация")
+            me = await client.get_me()
+            chat = await client.get_entity(config["chat_link"])
+            alarm_channel = await client.get_entity(config["alarm_channel_link"])
 
-        me = await client.get_me()
-        chat = await client.get_entity(config["chat_link"])
-        alarm_channel = await client.get_entity(config["alarm_channel_link"])
+            logger.warning(f"Подключено к чату: {getattr(chat, 'title', chat.id)}")
+            logger.warning(f"Подключено к каналу: {getattr(alarm_channel, 'title', alarm_channel.id)}")
+            
+            # Фоновые задачи для поддержания соединения
+            async def keep_alive():
+                """Периодическая проверка соединения"""
+                while True:
+                    await asyncio.sleep(30)  # Проверка каждые 30 секунд
+                    try:
+                        await client.get_me()
+                        logger.debug("Keep-alive ping")
+                    except Exception as e:
+                        logger.warning(f"Keep-alive failed: {e}")
+                        # Инициируем переподключение, выкидывая исключение
+                        raise ConnectionError("Keep-alive failed")
+            
+            # Запускаем keep-alive в фоне
+            keep_alive_task = asyncio.create_task(keep_alive())
 
-        logger.warning(f"Подключено к чату: {getattr(chat, 'title', chat.id)}")
-        logger.warning(f"Подключено к каналу: {getattr(alarm_channel, 'title', alarm_channel.id)}")
+            @client.on(events.NewMessage(chats=chat))
+            async def message_handler(event):
+                global last_response_time
 
-        @client.on(events.NewMessage(chats=chat))
-        async def message_handler(event):
-            global last_response_time
-
-            if config.get("ignore_own_messages", True) and event.sender_id == me.id:
-                return
-
-            current_time = datetime.now()
-
-            if last_response_time:
-                elapsed = (current_time - last_response_time).total_seconds()
-                if elapsed < config["min_response_interval"]:
-                    logger.info(f"Пропуск: интервал менее {config['min_response_interval']} сек")
+                if config.get("ignore_own_messages", True) and event.sender_id == me.id:
                     return
 
-            message_text = (event.raw_text or "").lower()
+                current_time = datetime.now()
 
-            has_keyword = any(k in message_text for k in config["keywords"])
-            has_exclusion = any(e in message_text for e in config["exclusions"])
+                if last_response_time:
+                    elapsed = (current_time - last_response_time).total_seconds()
+                    if elapsed < config["min_response_interval"]:
+                        logger.info(f"Пропуск: интервал менее {config['min_response_interval']} сек")
+                        return
 
-            if not has_keyword or has_exclusion:
-                return
+                message_text = (event.raw_text or "").lower()
 
-            last_response_time = current_time
-            delay = random.uniform(3, 6)
-            await asyncio.sleep(delay)
+                has_keyword = any(k in message_text for k in config["keywords"])
+                has_exclusion = any(e in message_text for e in config["exclusions"])
 
-            reply_error = None
+                if not has_keyword or has_exclusion:
+                    return
 
+                last_response_time = current_time
+                delay = random.uniform(3, 6)
+                await asyncio.sleep(delay)
+
+                reply_error = None
+
+                try:
+                    await event.reply(config["reply_text"])
+                    logger.warning(f"Отправлен ответ на сообщение: {message_text[:80]}")
+
+                except (ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError) as e:
+                    reply_error = "нет прав на отправку сообщения в исходный чат"
+                    logger.warning(f"Не удалось ответить в исходный чат: {e}")
+
+                except Exception as e:
+                    reply_error = str(e)
+                    logger.exception(f"Ошибка при ответе в исходный чат: {e}")
+
+                await safe_send_alarm(
+                    client=client,
+                    alarm_channel=alarm_channel,
+                    chat=chat,
+                    message_text=message_text,
+                    current_time=current_time,
+                    reason_text=reply_error
+                )
+
+            logger.warning("Автоответчик запущен. Ожидание сообщений...")
+            
+            # Основной цикл с защитой от потери соединения
             try:
-                await event.reply(config["reply_text"])
-                logger.warning(f"Отправлен ответ на сообщение: {message_text[:80]}")
-
-            except (ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError) as e:
-                reply_error = "нет прав на отправку сообщения в исходный чат"
-                logger.warning(f"Не удалось ответить в исходный чат: {e}")
-
+                await client.run_until_disconnected()
             except Exception as e:
-                reply_error = str(e)
-                logger.exception(f"Ошибка при ответе в исходный чат: {e}")
+                logger.error(f"Соединение потеряно: {e}")
+                # Отменяем keep-alive задачу
+                keep_alive_task.cancel()
+                raise  # Переходим к переподключению
+            
+        except asyncio.CancelledError:
+            logger.warning("Задача отменена, выходим...")
+            break
+        except Exception as e:
+            logger.exception(f"Критическая ошибка: {e}")
+            # Ждем перед переподключением
+            await reconnect_with_backoff()
+            continue
 
-            await safe_send_alarm(
-                client=client,
-                alarm_channel=alarm_channel,
-                chat=chat,
-                message_text=message_text,
-                current_time=current_time,
-                reason_text=reply_error
-            )
 
-        logger.warning("Автоответчик запущен. Ожидание сообщений...")
-        await client.run_until_disconnected()
-
-    except Exception as e:
-        logger.exception(f"Критическая ошибка: {e}")
-        raise
-    finally:
-        await client.disconnect()
+async def run_bot_with_graceful_shutdown():
+    """Запускает бота и обрабатывает сигналы завершения"""
+    try:
+        await run_bot_with_reconnect()
+    except KeyboardInterrupt:
+        logger.warning("Бот остановлен пользователем")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
@@ -395,9 +463,11 @@ if __name__ == "__main__":
         if "--login-only" in sys.argv:
             asyncio.run(login_only())
         else:
-            asyncio.run(run_bot())
+            asyncio.run(run_bot_with_graceful_shutdown())
     except KeyboardInterrupt:
         logger.warning("Бот остановлен пользователем")
+    except Exception as e:
+        logger.exception(f"Необработанная ошибка: {e}")
 PY
 
   chmod +x "$BOT_FILE"
@@ -429,7 +499,10 @@ User=$USER
 WorkingDirectory=$APP_DIR
 ExecStart=$VENV_DIR/bin/python $BOT_FILE
 Restart=always
-RestartSec=10
+RestartSec=5
+StartLimitInterval=0
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
