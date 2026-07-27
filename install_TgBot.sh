@@ -192,16 +192,86 @@ import json
 import os
 import sys
 import time
+import sqlite3
+from contextlib import contextmanager
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOG_PATH = os.path.join(BASE_DIR, "bot.log")
+SESSION_PATH = os.path.join(BASE_DIR, "session_name")
 
 logger = logging.getLogger(__name__)
 last_response_time = None
-# Счетчик перезапусков для экспоненциальной задержки
 restart_attempt = 0
 last_restart_time = None
+
+# Настройки для борьбы с блокировкой базы данных
+SQLITE_RETRY_COUNT = 5
+SQLITE_RETRY_DELAY = 1
+
+
+@contextmanager
+def safe_session():
+    """Контекстный менеджер для безопасной работы с сессией"""
+    session_attempts = 0
+    while session_attempts < SQLITE_RETRY_COUNT:
+        try:
+            # Используем стандартный SQLite сессию
+            from telethon.sessions import SQLiteSession
+            session = SQLiteSession(SESSION_PATH)
+            yield session
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                session_attempts += 1
+                logger.warning(f"База данных заблокирована, попытка {session_attempts}/{SQLITE_RETRY_COUNT}")
+                time.sleep(SQLITE_RETRY_DELAY * session_attempts)
+            else:
+                raise
+    raise sqlite3.OperationalError("Не удалось получить доступ к базе данных после нескольких попыток")
+
+
+def create_client(config):
+    """Создает клиента с обработкой блокировки БД"""
+    from telethon import TelegramClient
+    
+    # Пробуем создать клиента с обработкой ошибок
+    for attempt in range(SQLITE_RETRY_COUNT):
+        try:
+            client = TelegramClient(
+                SESSION_PATH,
+                config["api_id"],
+                config["api_hash"],
+                connection_retries=5,
+                retry_delay=2,
+                auto_reconnect=True,
+                timeout=15,
+                flood_sleep_threshold=0,
+            )
+            return client
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                logger.warning(f"Ошибка создания клиента, попытка {attempt + 1}/{SQLITE_RETRY_COUNT}")
+                time.sleep(SQLITE_RETRY_DELAY * (attempt + 1))
+            else:
+                raise
+    
+    raise sqlite3.OperationalError("Не удалось создать клиента после нескольких попыток")
+
+
+async def safe_start_client(client, phone):
+    """Безопасный старт клиента с обработкой блокировки БД"""
+    for attempt in range(SQLITE_RETRY_COUNT):
+        try:
+            await client.start(phone)
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                logger.warning(f"БД заблокирована при старте, попытка {attempt + 1}/{SQLITE_RETRY_COUNT}")
+                await asyncio.sleep(SQLITE_RETRY_DELAY * (attempt + 1))
+            else:
+                raise
+    raise sqlite3.OperationalError("Не удалось стартовать клиента после нескольких попыток")
 
 
 def load_config():
@@ -231,8 +301,6 @@ def load_config():
     config.setdefault("reply_text", "бронь, пожалуйста")
     config.setdefault("log_level", "WARNING")
     config.setdefault("ignore_own_messages", True)
-    config.setdefault("max_reconnect_attempts", 20)  # Максимум попыток переподключения
-    config.setdefault("reconnect_delay_base", 5)    # Базовая задержка между попытками
 
     return config
 
@@ -251,12 +319,12 @@ def setup_logging(config):
         force=True
     )
 
-    # По умолчанию скрываем шумные INFO-логи Telethon
     telethon_level = logging.WARNING
     if log_level <= logging.DEBUG:
         telethon_level = logging.INFO
 
     logging.getLogger("telethon").setLevel(telethon_level)
+    logging.getLogger("telethon.crypto").setLevel(logging.WARNING)
 
     return logging.getLogger(__name__)
 
@@ -285,49 +353,51 @@ async def login_only():
     config = load_config()
     logger = setup_logging(config)
 
-    client = TelegramClient(
-        os.path.join(BASE_DIR, "session_name"),
-        config["api_id"],
-        config["api_hash"],
-        connection_retries=10,
-        retry_delay=3,
-        auto_reconnect=True,
-        timeout=30
-    )
+    # Удаляем старую сессию если она повреждена
+    if os.path.exists(SESSION_PATH) and os.path.getsize(SESSION_PATH) == 0:
+        os.remove(SESSION_PATH)
+        logger.warning("Удален пустой файл сессии")
+
+    client = create_client(config)
 
     try:
         logger.warning("Подключение к Telegram для авторизации...")
-        await client.start(config["phone"])
+        await safe_start_client(client, config["phone"])
         me = await client.get_me()
         logger.warning(f"Авторизация успешна: {getattr(me, 'first_name', '')} {getattr(me, 'last_name', '')}")
+    except Exception as e:
+        logger.exception(f"Ошибка авторизации: {e}")
+        # Если сессия повреждена - удаляем её
+        if os.path.exists(SESSION_PATH):
+            os.remove(SESSION_PATH)
+            logger.warning("Удален поврежденный файл сессии")
+        raise
     finally:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except:
+            pass
 
 
 async def reconnect_with_backoff():
-    """Экспоненциальная задержка при повторных переподключениях"""
     global restart_attempt, last_restart_time
     
     restart_attempt += 1
     current_time = time.time()
     
-    # Сбрасываем счетчик, если прошло больше часа с последнего сбоя
     if last_restart_time and (current_time - last_restart_time) > 3600:
         restart_attempt = 0
     
     last_restart_time = current_time
     
-    # Экспоненциальная задержка: 5, 10, 20, 40, 80, 120 секунд (максимум 2 минуты)
     delay = min(5 * (2 ** (restart_attempt - 1)), 120)
     logger.warning(f"Пауза перед переподключением: {delay} секунд (попытка #{restart_attempt})")
     await asyncio.sleep(delay)
 
 
 async def run_bot_with_reconnect():
-    """Основной цикл с бесконечными попытками переподключения"""
     global last_response_time, logger, restart_attempt
     
-    # Сбрасываем счетчик при первом запуске
     restart_attempt = 0
     
     while True:
@@ -335,22 +405,22 @@ async def run_bot_with_reconnect():
             config = load_config()
             logger = setup_logging(config)
             
-            # Создаем клиента с улучшенными настройками
-            client = TelegramClient(
-                os.path.join(BASE_DIR, "session_name"),
-                config["api_id"],
-                config["api_hash"],
-                connection_retries=5,          # Уменьшаем, чтобы быстрее переключаться на наш механизм
-                retry_delay=2,                 # Меньше ждем между попытками внутри Telethon
-                auto_reconnect=True,
-                timeout=15,                    # Уменьшаем таймаут для быстрого обнаружения проблем
-                flood_sleep_threshold=0,       # Отключаем задержки при флуде
-            )
+            # Проверяем целостность сессии
+            if os.path.exists(SESSION_PATH):
+                try:
+                    # Пытаемся открыть сессию для проверки
+                    from telethon.sessions import SQLiteSession
+                    test_session = SQLiteSession(SESSION_PATH)
+                    test_session.get_auth_key()
+                except Exception as e:
+                    logger.warning(f"Сессия повреждена, удаляем: {e}")
+                    os.remove(SESSION_PATH)
+            
+            client = create_client(config)
             
             logger.warning("Подключение к Telegram...")
-            await client.start(config["phone"])
+            await safe_start_client(client, config["phone"])
             
-            # Сброс счетчика при успешном подключении
             restart_attempt = 0
             
             logger.warning("Успешная авторизация")
@@ -362,20 +432,21 @@ async def run_bot_with_reconnect():
             logger.warning(f"Подключено к чату: {getattr(chat, 'title', chat.id)}")
             logger.warning(f"Подключено к каналу: {getattr(alarm_channel, 'title', alarm_channel.id)}")
             
-            # Фоновые задачи для поддержания соединения
+            # Улучшенный Keep-Alive с обработкой ошибок
             async def keep_alive():
-                """Периодическая проверка соединения"""
+                consecutive_errors = 0
                 while True:
-                    await asyncio.sleep(30)  # Проверка каждые 30 секунд
+                    await asyncio.sleep(30)
                     try:
                         await client.get_me()
+                        consecutive_errors = 0
                         logger.debug("Keep-alive ping")
                     except Exception as e:
-                        logger.warning(f"Keep-alive failed: {e}")
-                        # Инициируем переподключение, выкидывая исключение
-                        raise ConnectionError("Keep-alive failed")
+                        consecutive_errors += 1
+                        logger.warning(f"Keep-alive failed ({consecutive_errors}): {e}")
+                        if consecutive_errors >= 3:
+                            raise ConnectionError("Keep-alive failed too many times")
             
-            # Запускаем keep-alive в фоне
             keep_alive_task = asyncio.create_task(keep_alive())
 
             @client.on(events.NewMessage(chats=chat))
@@ -430,27 +501,32 @@ async def run_bot_with_reconnect():
 
             logger.warning("Автоответчик запущен. Ожидание сообщений...")
             
-            # Основной цикл с защитой от потери соединения
             try:
                 await client.run_until_disconnected()
             except Exception as e:
                 logger.error(f"Соединение потеряно: {e}")
-                # Отменяем keep-alive задачу
                 keep_alive_task.cancel()
-                raise  # Переходим к переподключению
+                raise
             
         except asyncio.CancelledError:
             logger.warning("Задача отменена, выходим...")
             break
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                logger.warning("БД заблокирована, удаляем сессию и перезапускаем...")
+                if os.path.exists(SESSION_PATH):
+                    os.remove(SESSION_PATH)
+                await reconnect_with_backoff()
+            else:
+                logger.exception(f"Ошибка SQLite: {e}")
+                await reconnect_with_backoff()
         except Exception as e:
             logger.exception(f"Критическая ошибка: {e}")
-            # Ждем перед переподключением
             await reconnect_with_backoff()
             continue
 
 
 async def run_bot_with_graceful_shutdown():
-    """Запускает бота и обрабатывает сигналы завершения"""
     try:
         await run_bot_with_reconnect()
     except KeyboardInterrupt:
